@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Family Tree</title>
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#151925; --text:#e7eaf0; --muted:#a8b0c2; --border:rgba(255,255,255,.12);
+    }
+    body{ margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); }
+    header{ padding:16px 20px; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:10;
+      background:linear-gradient(to bottom, rgba(15,17,21,.95), rgba(15,17,21,.75)); backdrop-filter:blur(8px);
+    }
+    header h1{ margin:0; font-size:16px; font-weight:600; }
+    header p{ margin:6px 0 0; font-size:13px; color:var(--muted); }
+
+    .wrap{ width:min(1200px, calc(100vw - 32px)); margin:16px auto 40px; }
+
+    .viewer{
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      overflow:hidden;
+      height:min(75vh, 720px);
+      position:relative;
+      user-select:none;
+      touch-action:none;
+    }
+    canvas{ width:100%; height:100%; display:block; }
+
+    .toolbar{
+      position:absolute; left:12px; top:12px; display:flex; gap:8px; z-index:2;
+      background:rgba(0,0,0,.35); border:1px solid var(--border); border-radius:12px; padding:8px;
+      backdrop-filter: blur(8px);
+    }
+    .btn{
+      font:inherit; font-size:13px; color:var(--text);
+      background:rgba(255,255,255,.06);
+      border:1px solid var(--border);
+      border-radius:10px; padding:6px 10px; cursor:pointer;
+    }
+    .btn:hover{ background:rgba(255,255,255,.10); }
+    .status{
+      position:absolute; right:12px; top:12px;
+      background:rgba(0,0,0,.35); border:1px solid var(--border); border-radius:12px; padding:8px 10px;
+      color:var(--muted); font-size:12px; z-index:2;
+      backdrop-filter: blur(8px);
+    }
+
+    .gallery{
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));
+      gap:14px;
+      margin-top:16px;
+    }
+    .card{
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      overflow:hidden;
+    }
+    .card a{
+      display:block;
+      cursor:zoom-in;
+      color:inherit;
+      text-decoration:none;
+    }
+    .card img{ width:100%; height:auto; display:block; }
+
+    /* Placeholder caption area (empty now, for future text) */
+    .cap{
+      padding:10px 12px;
+      font-size:12px;
+      color:var(--muted);
+      border-top:1px solid var(--border);
+      min-height: 34px; /* keeps the box visible as a placeholder */
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Family Tree</h1>
+    <p>Click to zoom in where you clicked. Drag to pan. Use + / − (or mouse wheel) to zoom. Reset returns to fit view.</p>
+  </header>
+
+  <div class="wrap">
+    <div class="viewer" id="viewer">
+      <div class="toolbar" id="toolbar">
+        <button class="btn" id="zoomOut" title="Zoom out">−</button>
+        <button class="btn" id="zoomIn" title="Zoom in">+</button>
+        <button class="btn" id="reset" title="Reset to fit">Reset</button>
+      </div>
+      <div class="status" id="status">Loading…</div>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <section class="gallery" id="gallery"></section>
+  </div>
+
+  <script>
+    // ------- Family tree canvas (fit preview + click-to-zoom + pan) -------
+    const viewer = document.getElementById("viewer");
+    const toolbar = document.getElementById("toolbar");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+
+    const img = new Image();
+    img.src = "familytree.png";
+
+    const state = {
+      scale: 1,
+      minScale: 1,
+      maxScale: 6,
+      offsetX: 0,
+      offsetY: 0,
+      dragging: false,
+      lastX: 0,
+      lastY: 0
+    };
+
+    // Prevent toolbar clicks from triggering viewer click-to-zoom
+    ["mousedown","click","dblclick","pointerdown","pointerup","touchstart"].forEach(evt => {
+      toolbar.addEventListener(evt, (e) => e.stopPropagation(), { passive: true });
+    });
+
+    function resizeCanvas() {
+      const rect = viewer.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      canvas.style.width = rect.width + "px";
+      canvas.style.height = rect.height + "px";
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+
+    function clampOffsets() {
+      const rect = viewer.getBoundingClientRect();
+      const vw = rect.width;
+      const vh = rect.height;
+
+      const viewWInImg = vw / state.scale;
+      const viewHInImg = vh / state.scale;
+
+      if (viewWInImg >= img.width) state.offsetX = (img.width - viewWInImg) / 2;
+      else state.offsetX = Math.max(0, Math.min(state.offsetX, img.width - viewWInImg));
+
+      if (viewHInImg >= img.height) state.offsetY = (img.height - viewHInImg) / 2;
+      else state.offsetY = Math.max(0, Math.min(state.offsetY, img.height - viewHInImg));
+    }
+
+    function fitToView() {
+      const rect = viewer.getBoundingClientRect();
+      const vw = rect.width;
+      const vh = rect.height;
+
+      const sx = vw / img.width;
+      const sy = vh / img.height;
+      state.scale = Math.min(sx, sy);
+      state.minScale = state.scale;
+      state.offsetX = 0;
+      state.offsetY = 0;
+      clampOffsets();
+      draw();
+    }
+
+    function draw() {
+      if (!img.complete || !img.naturalWidth) return;
+
+      const rect = viewer.getBoundingClientRect();
+      const vw = rect.width;
+      const vh = rect.height;
+
+      clampOffsets();
+
+      ctx.clearRect(0, 0, vw, vh);
+
+      const srcW = vw / state.scale;
+      const srcH = vh / state.scale;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(
+        img,
+        state.offsetX, state.offsetY, srcW, srcH,
+        0, 0, vw, vh
+      );
+
+      statusEl.textContent = `Zoom: ${(state.scale / state.minScale).toFixed(2)}×`;
+    }
+
+    function zoomAt(viewX, viewY, factor) {
+      const imgX = state.offsetX + (viewX / state.scale);
+      const imgY = state.offsetY + (viewY / state.scale);
+
+      const newScale = Math.max(state.minScale, Math.min(state.scale * factor, state.maxScale));
+      state.scale = newScale;
+
+      state.offsetX = imgX - (viewX / state.scale);
+      state.offsetY = imgY - (viewY / state.scale);
+
+      clampOffsets();
+      draw();
+    }
+
+    // Drag pan (mouse)
+    viewer.addEventListener("mousedown", (e) => {
+      const r = viewer.getBoundingClientRect();
+      state.dragging = true;
+      state.lastX = e.clientX - r.left;
+      state.lastY = e.clientY - r.top;
+      viewer.style.cursor = "grabbing";
+    });
+
+    window.addEventListener("mouseup", () => {
+      state.dragging = false;
+      viewer.style.cursor = "default";
+    });
+
+    viewer.addEventListener("mousemove", (e) => {
+      if (!state.dragging) return;
+      const r = viewer.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+
+      const dx = (x - state.lastX) / state.scale;
+      const dy = (y - state.lastY) / state.scale;
+
+      state.offsetX -= dx;
+      state.offsetY -= dy;
+
+      state.lastX = x;
+      state.lastY = y;
+
+      draw();
+    });
+
+    // Click-to-zoom-in (ignore drags)
+    let downPos = null;
+    viewer.addEventListener("mousedown", (e) => {
+      downPos = { x: e.clientX, y: e.clientY };
+    });
+    viewer.addEventListener("click", (e) => {
+      if (!downPos) return;
+      const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
+      downPos = null;
+      if (dist > 4) return;
+
+      const r = viewer.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      zoomAt(x, y, 1.8);
+    });
+
+    // Wheel zoom
+    viewer.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = viewer.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      zoomAt(x, y, e.deltaY > 0 ? 0.9 : 1.1);
+    }, { passive: false });
+
+    // Touch pan + double-tap zoom
+    let lastTapTime = 0;
+    viewer.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const r = viewer.getBoundingClientRect();
+      state.dragging = true;
+      state.lastX = t.clientX - r.left;
+      state.lastY = t.clientY - r.top;
+
+      const now = Date.now();
+      if (now - lastTapTime < 300) {
+        zoomAt(state.lastX, state.lastY, 1.8);
+        lastTapTime = 0;
+      } else {
+        lastTapTime = now;
+      }
+    }, { passive: true });
+
+    viewer.addEventListener("touchmove", (e) => {
+      if (!state.dragging || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const r = viewer.getBoundingClientRect();
+      const x = t.clientX - r.left;
+      const y = t.clientY - r.top;
+
+      const dx = (x - state.lastX) / state.scale;
+      const dy = (y - state.lastY) / state.scale;
+
+      state.offsetX -= dx;
+      state.offsetY -= dy;
+
+      state.lastX = x;
+      state.lastY = y;
+
+      draw();
+    }, { passive: true });
+
+    viewer.addEventListener("touchend", () => { state.dragging = false; });
+
+    // Buttons (zoom around center)
+    document.getElementById("zoomIn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      zoomAt(viewer.clientWidth / 2, viewer.clientHeight / 2, 1.25);
+    });
+    document.getElementById("zoomOut").addEventListener("click", (e) => {
+      e.stopPropagation();
+      zoomAt(viewer.clientWidth / 2, viewer.clientHeight / 2, 0.8);
+    });
+    document.getElementById("reset").addEventListener("click", (e) => {
+      e.stopPropagation();
+      fitToView();
+    });
+
+    img.onload = () => {
+      statusEl.textContent = "Loaded";
+      resizeCanvas();
+      fitToView();
+    };
+    img.onerror = () => { statusEl.textContent = "Failed to load familytree.png"; };
+
+    window.addEventListener("resize", resizeCanvas);
+
+    // ------- Gallery: click opens original (new tab), no filename shown -------
+    const photos = [
+      "photo1.jpg",
+      "photo2.jpeg",
+      "photo3.jpeg",
+      "photo4.jpg",
+      "photo5.jpg",
+      "photo6.jpg",
+      "photo7.jpeg",
+      "photo8.jpeg",
+    ];
+
+    const gallery = document.getElementById("gallery");
+
+    photos.forEach((src) => {
+      const fig = document.createElement("figure");
+      fig.className = "card";
+      fig.innerHTML = `
+        <a href="${src}" target="_blank" rel="noopener noreferrer">
+          <img src="${src}" alt="">
+        </a>
+        <figcaption class="cap"></figcaption>
+      `;
+      gallery.appendChild(fig);
+    });
+  </script>
+</body>
+</html>
